@@ -2,6 +2,7 @@
 VideoBrain 主API服务
 """
 import os
+import asyncio
 import logging
 from typing import List, Optional
 from datetime import datetime
@@ -11,6 +12,8 @@ from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 
 from models.database import init_db, get_db, Video, KnowledgeEntry
+from middleware.error_handler import ErrorHandlerMiddleware
+from middleware.request_logger import RequestLoggerMiddleware
 from services.video_downloader import VideoDownloader
 from services.audio_extractor import AudioExtractor
 from services.speech_to_text import SpeechToTextService
@@ -29,14 +32,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS配置
+# CORS配置 — 限制为实际前端域名
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 接入自定义中间件
+app.add_middleware(ErrorHandlerMiddleware)
+app.add_middleware(RequestLoggerMiddleware)
 
 # 初始化服务
 video_downloader = VideoDownloader()
@@ -80,6 +90,33 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat()
     }
 
+# 重试处理
+@app.post("/api/videos/{video_id}/retry")
+async def retry_video(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """重试失败的视频处理"""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    if video.status not in ["failed", "completed", "processing"]:
+        raise HTTPException(status_code=400, detail="只能重试失败、已完成或卡住的视频")
+
+    # 重置状态
+    video.status = "pending"
+    video.progress = 0
+    video.error_message = None
+    db.commit()
+
+    # 重新提交后台任务
+    background_tasks.add_task(
+        process_video_pipeline,
+        video.id,
+        video.url,
+        "zh",
+        video.platform
+    )
+
+    return {"video_id": video.id, "status": "pending", "message": "重试任务已创建"}
+
 # 视频处理接口
 @app.post("/api/videos/process")
 async def process_video(request: VideoURLRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -106,8 +143,8 @@ async def process_video(request: VideoURLRequest, background_tasks: BackgroundTa
                     "message": "视频正在处理中"
                 }
         
-        # 获取视频信息
-        video_info = video_downloader.get_video_info(request.url)
+        # 获取视频信息（同步阻塞调用放到线程池）
+        video_info = await asyncio.to_thread(video_downloader.get_video_info, request.url)
         
         # 创建视频记录
         video = Video(
@@ -191,10 +228,16 @@ async def process_video_pipeline(video_id: int, url: str, language: str, platfor
         # 3. 语音转文字
         logger.info("开始语音转文字")
         transcript_result = speech_to_text.transcribe_audio(audio_path, language)
-        
-        if transcript_result['success']:
-            video.transcript = transcript_result['text']
-        
+
+        if not transcript_result['success']:
+            video.status = "failed"
+            video.error_message = f"语音转文字失败: {transcript_result.get('error', '未知错误')}"
+            db.commit()
+            audio_extractor.cleanup(audio_path)
+            video_downloader.cleanup(video_path)
+            return
+
+        video.transcript = transcript_result['text']
         video.progress = 70
         db.commit()
         

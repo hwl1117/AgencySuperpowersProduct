@@ -12,6 +12,14 @@ OPENAI_API_KEY=sk-your-api-key-here
 ### 可选配置
 
 ```env
+# MiMo API配置（backend-node使用）
+MIMO_API_KEY=your-mimo-api-key
+MIMO_API_URL=https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+MIMO_MODEL=mimo-v2.5-pro
+
+# 前端API地址
+NEXT_PUBLIC_API_URL=http://localhost:8000
+
 # 数据库配置
 DATABASE_URL=sqlite:///./videobrain.db
 

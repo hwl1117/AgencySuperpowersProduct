@@ -158,7 +158,36 @@ Content-Type: application/json
 }
 ```
 
-### 6. 搜索知识库
+### 6. 重试视频处理
+
+```http
+POST /api/videos/{video_id}/retry
+```
+
+**路径参数**:
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| video_id | int | 是 | 视频ID |
+
+**说明**: 重试失败、已完成或卡住的视频处理。会重置视频状态为 `pending` 并重新提交处理任务。
+
+**响应示例**:
+```json
+{
+  "video_id": 1,
+  "status": "pending",
+  "message": "重试任务已创建"
+}
+```
+
+**错误响应**:
+```json
+{
+  "detail": "只能重试失败、已完成或卡住的视频"
+}
+```
+
+### 7. 搜索知识库
 
 ```http
 POST /api/knowledge/search

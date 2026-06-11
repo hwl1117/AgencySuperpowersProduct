@@ -78,11 +78,12 @@ class SpeechToTextService:
     def _transcribe_large_file(self, audio_path: str, language: str) -> Dict:
         """转录大文件（分片处理）"""
         import subprocess
-        
-        # 将大文件分割成小片段
-        chunk_duration = 600  # 10分钟
-        temp_dir = "./temp_chunks"
-        os.makedirs(temp_dir, exist_ok=True)
+        import tempfile
+
+        chunk_duration = 600  # 10分钟每片，保持在 Whisper 25MB 限制内
+
+        # 使用唯一临时目录避免并发竞态
+        temp_dir = tempfile.mkdtemp(prefix="videobrain_whisper_")
         
         try:
             # 获取音频时长

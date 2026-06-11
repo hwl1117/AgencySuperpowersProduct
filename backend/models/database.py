@@ -73,20 +73,6 @@ class KnowledgeEntry(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-class ProcessingTask(Base):
-    """处理任务表"""
-    __tablename__ = "processing_tasks"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    video_id = Column(Integer, index=True)
-    task_type = Column(String(50))  # download, extract_audio, transcribe, analyze, summarize
-    status = Column(String(20), default="pending")
-    result = Column(JSON)
-    error = Column(Text)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    completed_at = Column(DateTime)
-
 # 创建数据库表
 def init_db():
     Base.metadata.create_all(bind=engine)

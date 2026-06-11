@@ -2,7 +2,7 @@
  * VideoBrain API客户端 v2.5
  */
 
-const API_BASE_URL = process.env.API_URL || 'http://localhost:8000'
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 interface ApiResponse<T> {
   success: boolean

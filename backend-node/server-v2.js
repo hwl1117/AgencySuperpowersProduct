@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const fetch = require('node-fetch');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -19,16 +19,20 @@ try {
   console.log('⚠️ puppeteer-core 未安装，抖音页面抓取不可用');
 }
 
-const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME_PATH = process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 let browserInstance = null;
 
 const app = express();
-const PORT = 8000;
+const PORT = process.env.PORT || 8000;
 
-// MiMo API 配置
-const MIMO_API_KEY = 'tp-sp2whw73argusk4o3k7tmer4q40tpbvnvvdg5p3yi9arvacu';
-const MIMO_API_URL = 'https://token-plan-sgp.xiaomimimo.com/v1/chat/completions';
-const MIMO_MODEL = 'mimo-v2.5-pro';
+// MiMo API 配置 — 从环境变量读取，不要硬编码
+const MIMO_API_KEY = process.env.MIMO_API_KEY;
+const MIMO_API_URL = process.env.MIMO_API_URL || 'https://token-plan-sgp.xiaomimimo.com/v1/chat/completions';
+const MIMO_MODEL = process.env.MIMO_MODEL || 'mimo-v2.5-pro';
+
+if (!MIMO_API_KEY) {
+  console.error('⚠️ MIMO_API_KEY 环境变量未设置，AI 功能将不可用');
+}
 
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 const AUDIO_DIR = path.join(__dirname, 'audio');
@@ -67,9 +71,11 @@ async function callMiMo(systemPrompt, userPrompt, maxTokens = 4096) {
   } catch (error) { console.error('MiMo API Call Failed:', error.message); return null; }
 }
 
-function execCommand(command, timeout = 300000) {
+// 安全版本：使用 execFile 避免 shell 注入
+function execCommand(args, timeout = 300000) {
   return new Promise((resolve, reject) => {
-    exec(command, { maxBuffer: 1024 * 1024 * 50, timeout }, (error, stdout, stderr) => {
+    const [cmd, ...cmdArgs] = Array.isArray(args) ? args : args.split(' ');
+    execFile(cmd, cmdArgs, { maxBuffer: 1024 * 1024 * 50, timeout }, (error, stdout, stderr) => {
       if (error) reject(new Error(stderr || error.message));
       else resolve(stdout);
     });
@@ -366,19 +372,19 @@ async function downloadVideoFromStreamUrl(streamUrl, videoId, refererUrl) {
   try {
     console.log('🎬 通过视频流URL直接下载: ' + streamUrl.substring(0, 100) + '...');
 
-    // 使用 curl 下载，带 Referer 和 Cookie 头
+    // 使用 curl 下载，带 Referer 和 Cookie 头（参数数组避免注入）
     const referer = refererUrl || 'https://www.douyin.com/';
-    const command = 'curl -L -o "' + outputPath + '" -H "Referer: ' + referer + '" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --max-time 120 "' + streamUrl + '"';
+    const curlArgs = ['-L', '-o', outputPath, '-H', 'Referer: ' + referer, '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', '--max-time', '120', streamUrl];
 
-    await execCommand(command, 180000);
+    await execCommand(['curl', ...curlArgs], 180000);
 
     if (fs.existsSync(outputPath)) {
       const stats = fs.statSync(outputPath);
       if (stats.size > 50000) { // 大于50KB才算下载成功（排除缩略图/预览）
         // 使用 ffprobe 检查视频时长和是否有音频轨
         try {
-          const probeCmd = 'ffprobe -v quiet -print_format json -show_format -show_streams "' + outputPath + '"';
-          const probeResult = await execCommand(probeCmd, 15000);
+          const probeArgs = ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', outputPath];
+          const probeResult = await execCommand(['ffprobe', ...probeArgs], 15000);
           const probeData = JSON.parse(probeResult);
           const duration = parseFloat(probeData.format?.duration || 0);
           const hasAudio = (probeData.streams || []).some(s => s.codec_type === 'audio');
@@ -459,13 +465,13 @@ async function downloadVideo(url, videoId) {
   try {
     console.log('📥 开始下载视频: ' + url);
     const platform = detectPlatform(url);
-    let command;
+    let ytArgs;
     if (platform === 'douyin' || platform === 'xiaohongshu') {
-      command = 'yt-dlp --no-check-certificates --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -f "best" --merge-output-format mp4 -o "' + outputPath + '" "' + url + '"';
+      ytArgs = ['--no-check-certificates', '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', '-f', 'best', '--merge-output-format', 'mp4', '-o', outputPath, url];
     } else {
-      command = 'yt-dlp --no-check-certificates -f "bestvideo[height<=720]+bestaudio/best[height<=720]" --merge-output-format mp4 -o "' + outputPath + '" "' + url + '"';
+      ytArgs = ['--no-check-certificates', '-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]', '--merge-output-format', 'mp4', '-o', outputPath, url];
     }
-    await execCommand(command, 120000);
+    await execCommand(['yt-dlp', ...ytArgs], 120000);
     const possibleFiles = [outputPath, outputPath.replace('.mp4', '.webm'), outputPath.replace('.mp4', '.mkv')];
     for (const f of possibleFiles) { if (fs.existsSync(f)) { console.log('✅ 视频下载完成: ' + f); return f; } }
     const files = fs.readdirSync(DOWNLOADS_DIR);
@@ -479,8 +485,8 @@ async function extractAudio(videoPath, videoId) {
   const audioPath = path.join(AUDIO_DIR, videoId + '.wav');
   try {
     console.log('🎵 开始提取音频...');
-    const command = 'ffmpeg -i "' + videoPath + '" -vn -acodec pcm_s16le -ar 16000 -ac 1 "' + audioPath + '" -y';
-    await execCommand(command, 120000);
+    const ffmpegArgs = ['-i', videoPath, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', audioPath, '-y'];
+    await execCommand(['ffmpeg', ...ffmpegArgs], 120000);
     if (fs.existsSync(audioPath)) { console.log('✅ 音频提取完成'); return audioPath; }
     throw new Error('音频文件未生成');
   } catch (error) { console.error('❌ 音频提取失败:', error.message); return null; }
@@ -489,8 +495,8 @@ async function extractAudio(videoPath, videoId) {
 async function transcribeAudio(audioPath, videoId) {
   try {
     console.log('📝 开始语音转文字...');
-    const command = 'whisper "' + audioPath + '" --model base --output_format txt --output_dir "' + AUDIO_DIR + '"';
-    await execCommand(command, 600000);
+    const whisperArgs = [audioPath, '--model', 'small', '--output_format', 'txt', '--output_dir', AUDIO_DIR, '--language', 'zh'];
+    await execCommand(['whisper', ...whisperArgs], 1800000); // 30分钟超时，支持长视频
     const whisperOutput = path.join(AUDIO_DIR, videoId + '.txt');
     if (fs.existsSync(whisperOutput)) {
       const transcript = fs.readFileSync(whisperOutput, 'utf-8').trim();
@@ -569,49 +575,85 @@ async function analyzeWithMiMo(transcript, url, platform) {
     return generateFallbackAnalysis(platform, url, transcript);
   }
   try {
-    const textForAnalysis = transcript.substring(0, 3000);
     const platformNames = { 'douyin': '抖音', 'bilibili': 'B站', 'youtube': 'YouTube', 'kuaishou': '快手', 'tiktok': 'TikTok', 'xiaohongshu': '小红书', 'weixin_video': '微信视频号' };
     const platformName = platformNames[platform] || platform;
 
-    // 使用简洁明确的 prompt（经过验证有效的格式），限制输入长度，增大 max_tokens
-    const shortText = textForAnalysis.substring(0, 1500); // 限制输入避免 token 浪费
-    const systemPrompt = '你是视频内容分析AI。只输出纯JSON，不要代码块，不要其他文字。';
-    const userPrompt = '分析以下视频内容，输出JSON：\n\n' + shortText + '\n\n格式：{"title":"标题15字","summary":"100字摘要","key_points":["要点1","要点2","要点3"],"tags":["标签1","标签2","标签3"],"category":"分类","one_line_summary":"一句话"}';
-
-    const result = await callMiMo(systemPrompt, userPrompt, 4000); // 增大 token 限制
-
-    if (result) {
-      console.log('🔍 MiMo 返回长度: ' + result.length);
-      console.log('🔍 MiMo 返回前300字符: ' + result.substring(0, 300));
-      try {
-        // 清理：去除 markdown 代码块和前后文字
-        let cleanResult = result.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-        // 找到第一个 { 和最后一个 } 之间的内容
-        const firstBrace = cleanResult.indexOf('{');
-        const lastBrace = cleanResult.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace > firstBrace) {
-          const jsonStr = cleanResult.substring(firstBrace, lastBrace + 1);
-          console.log('🔍 提取的JSON长度: ' + jsonStr.length);
-          const parsed = JSON.parse(jsonStr);
-          const analysis = {
-            title: parsed.title || platformName + '视频内容',
-            summary: parsed.summary || transcript.substring(0, 200),
-            key_points: Array.isArray(parsed.key_points) ? parsed.key_points.slice(0, 7) : ['核心内容讲解', '实用技巧分享'],
-            tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8) : [platformName, '视频', '知识'],
-            category: parsed.category || '知识',
-            one_line_summary: parsed.one_line_summary || ''
-          };
-          console.log('✅ MiMo 分析成功!');
-          console.log('  标题: ' + analysis.title);
-          console.log('  摘要长度: ' + analysis.summary.length);
-          console.log('  关键点: ' + analysis.key_points.length + '个');
-          return analysis;
+    // 长文本分段分析 — 每段最多 4000 字符，保留完整内容
+    const CHUNK_SIZE = 4000;
+    const chunks = [];
+    if (transcript.length <= CHUNK_SIZE) {
+      chunks.push(transcript);
+    } else {
+      // 按句子边界分段
+      const sentences = transcript.split(/(?<=[。！？\r\n])/);
+      let currentChunk = '';
+      for (const s of sentences) {
+        if (currentChunk.length + s.length > CHUNK_SIZE && currentChunk.length > 200) {
+          chunks.push(currentChunk);
+          currentChunk = s;
+        } else {
+          currentChunk += s;
         }
-        console.log('⚠️ 未找到JSON结构');
-      } catch (parseError) { console.error('⚠️ JSON 解析失败: ' + parseError.message); }
-      return parseTextAnalysis(result, platform, transcript);
+      }
+      if (currentChunk) chunks.push(currentChunk);
     }
-    return generateFallbackAnalysis(platform, url, transcript);
+
+    console.log('  📄 转录文本 ' + transcript.length + ' 字符，分 ' + chunks.length + ' 段分析');
+
+    let allKeyPoints = [];
+    let allTags = new Set();
+    let fullSummary = '';
+    let title = platformName + '视频内容';
+    let category = '知识';
+    let oneLineSummary = '';
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const isLast = (i === chunks.length - 1);
+      const systemPrompt = '你是视频内容分析AI。只输出纯JSON，不要代码块，不要其他文字。';
+      const userPrompt = '分析以下视频转录文本（第' + (i + 1) + '/' + chunks.length + '段），输出JSON：\n\n' + chunk + '\n\n格式：' + (isLast
+        ? '{"title":"标题20字以内","summary":"200字详细摘要","key_points":["要点1","要点2","..."],"tags":["标签1","标签2","..."],"category":"分类","one_line_summary":"一句话概括"}'
+        : '{"summary":"本段100字摘要","key_points":["要点1","要点2","..."],"tags":["标签1","标签2"]}');
+
+      const result = await callMiMo(systemPrompt, userPrompt, 4000);
+      if (result) {
+        try {
+          let cleanResult = result.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+          const firstBrace = cleanResult.indexOf('{');
+          const lastBrace = cleanResult.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace > firstBrace) {
+            const jsonStr = cleanResult.substring(firstBrace, lastBrace + 1);
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.title && i === 0) title = parsed.title;
+            if (parsed.summary) fullSummary += (fullSummary ? ' ' : '') + parsed.summary;
+            if (Array.isArray(parsed.key_points)) allKeyPoints.push(...parsed.key_points);
+            if (Array.isArray(parsed.tags)) parsed.tags.forEach(t => allTags.add(t));
+            if (parsed.category && i === 0) category = parsed.category;
+            if (parsed.one_line_summary) oneLineSummary = parsed.one_line_summary;
+            console.log('  ✅ 第' + (i + 1) + '段分析完成');
+          }
+        } catch (e) {
+          console.log('  ⚠️ 第' + (i + 1) + '段 JSON 解析失败');
+        }
+      }
+    }
+
+    // 合并结果
+    const analysis = {
+      title: title,
+      summary: fullSummary.substring(0, 500) || transcript.substring(0, 200),
+      key_points: [...new Set(allKeyPoints)].slice(0, 10),
+      tags: [...allTags].slice(0, 10),
+      category: category,
+      one_line_summary: oneLineSummary || fullSummary.substring(0, 80)
+    };
+
+    console.log('✅ MiMo 分析完成!');
+    console.log('  标题: ' + analysis.title);
+    console.log('  摘要长度: ' + analysis.summary.length + ' 字符');
+    console.log('  关键点: ' + analysis.key_points.length + ' 个');
+    console.log('  标签: ' + analysis.tags.join(', '));
+    return analysis;
   } catch (error) {
     console.error('❌ MiMo 分析异常:', error.message);
     return generateFallbackAnalysis(platform, url, transcript);

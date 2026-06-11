@@ -13,10 +13,10 @@ const fs = require('fs');
 const app = express();
 const PORT = 8000;
 
-// MiMo API 配置
-const MIMO_API_KEY = 'tp-sp2whw73argusk4o3k7tmer4q40tpbvnvvdg5p3yi9arvacu';
-const MIMO_API_URL = 'https://token-plan-sgp.xiaomimimo.com/v1/chat/completions';
-const MIMO_MODEL = 'mimo-v2.5-pro';
+// MiMo API 配置 — 从环境变量读取
+const MIMO_API_KEY = process.env.MIMO_API_KEY;
+const MIMO_API_URL = process.env.MIMO_API_URL || 'https://token-plan-sgp.xiaomimimo.com/v1/chat/completions';
+const MIMO_MODEL = process.env.MIMO_MODEL || 'mimo-v2.5-pro';
 
 // 文件目录
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');

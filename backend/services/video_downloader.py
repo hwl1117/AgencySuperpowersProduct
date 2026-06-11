@@ -3,6 +3,7 @@
 """
 import os
 import re
+import hashlib
 import yt_dlp
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
@@ -157,19 +158,23 @@ class VideoDownloader:
         """提取视频ID"""
         parsed = urlparse(url)
         path = parsed.path
-        
+
         # 根据平台提取ID
         if platform == 'douyin':
             match = re.search(r'/video/(\d+)', path)
-            return match.group(1) if match else str(hash(url))
+            if match:
+                return match.group(1)
         elif platform == 'bilibili':
             match = re.search(r'/video/(BV\w+)', path)
-            return match.group(1) if match else str(hash(url))
+            if match:
+                return match.group(1)
         elif platform == 'youtube':
             match = re.search(r'[?&]v=([^&]+)', parsed.query)
-            return match.group(1) if match else str(hash(url))
-        else:
-            return str(abs(hash(url)))[:16]
+            if match:
+                return match.group(1)
+
+        # 使用确定性 hash 替代内置 hash()
+        return hashlib.md5(url.encode()).hexdigest()[:16]
     
     def _progress_hook(self, d: dict, callback=None):
         """下载进度回调"""
