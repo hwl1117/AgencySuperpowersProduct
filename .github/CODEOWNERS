@@ -1,0 +1,31 @@
+# VideoBrain Code Owners
+# 详细信息: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# 默认所有文件
+* @maintainer-username
+
+# 后端代码
+/backend/ @backend-team
+/backend/api/ @api-team
+/backend/services/ @services-team
+/backend/models/ @database-team
+
+# 前端代码
+/frontend/ @frontend-team
+/frontend/src/ @frontend-team
+
+# 文档
+/docs/ @docs-team
+*.md @docs-team
+
+# 配置文件
+docker-compose.yml @devops-team
+Dockerfile @devops-team
+*.yml @devops-team
+*.yaml @devops-team
+
+# 测试
+/tests/ @qa-team
+
+# GitHub配置
+/.github/ @maintainer-username

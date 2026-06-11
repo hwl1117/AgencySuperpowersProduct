@@ -1,0 +1,1166 @@
+'use client'
+
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Search, Link, Brain, BookOpen, Zap, Loader2, CheckCircle, AlertCircle, Tag, Clock, BarChart3, FileText, X, ChevronDown, ChevronUp, ExternalLink, Copy, Download, Edit3, Trash2, FolderPlus, Move, Save, Plus, GripVertical, Check, ArrowRight, LayoutGrid, List, Filter, MoreVertical, Folder, FolderOpen, Keyboard } from 'lucide-react'
+import ToastContainer, { showToast, listeners } from '@/components/Toast'
+import ThemeToggle from '@/components/ThemeToggle'
+import type { ToastType } from '@/components/Toast'
+
+interface VideoResult {
+  id: string
+  url: string
+  platform: string
+  title: string
+  description: string
+  duration: number
+  status: string
+  progress: number
+  processing_detail: string
+  transcript: string
+  transcript_preview: string
+  transcript_length: number
+  has_transcript: boolean
+  summary: string
+  one_line_summary: string
+  key_points: string[]
+  tags: string[]
+  category: string
+  created_at: string
+  processed_at: string
+}
+
+interface SearchResult {
+  doc_id: string
+  content: string
+  metadata: {
+    title: string
+    summary: string
+    one_line_summary: string
+    category: string
+    tags: string
+    source_platform: string
+    source_url: string
+    similarity: number
+    has_transcript: boolean
+    transcript_length: number
+    video_id: string
+  }
+  similarity: number
+}
+
+interface CategoryInfo {
+  name: string
+  count: number
+  videos: { id: string; title: string; platform: string; one_line_summary: string }[]
+}
+
+const API = 'http://localhost:8000'
+
+export default function Home() {
+  const [videoUrl, setVideoUrl] = useState('')
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [processingStatus, setProcessingStatus] = useState('')
+  const [processingProgress, setProcessingProgress] = useState(0)
+  const [processingDetail, setProcessingDetail] = useState('')
+  const [videoResults, setVideoResults] = useState<VideoResult[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [activeTab, setActiveTab] = useState<'process' | 'search' | 'library'>('process')
+  const [stats, setStats] = useState({ total_entries: 0, categories: [] as string[], category_count: 0, platform_distribution: {} as Record<string, number> })
+  const [selectedVideo, setSelectedVideo] = useState<VideoResult | null>(null)
+  const [showDetail, setShowDetail] = useState(false)
+  const [showFullTranscript, setShowFullTranscript] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [isLoadingLibrary, setIsLoadingLibrary] = useState(true)
+
+  // 编辑状态
+  const [isEditing, setIsEditing] = useState(false)
+  const [editForm, setEditForm] = useState<Partial<VideoResult>>({})
+  const [editKeyPointInput, setEditKeyPointInput] = useState('')
+  const [editTagInput, setEditTagInput] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+
+  // 删除状态
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<VideoResult | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [showBatchActions, setShowBatchActions] = useState(false)
+
+  // 分类管理状态
+  const [categories, setCategories] = useState<CategoryInfo[]>([])
+  const [uncategorized, setUncategorized] = useState<CategoryInfo>({ name: '未分类', count: 0, videos: [] })
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
+  const [showCategoryManager, setShowCategoryManager] = useState(false)
+  const [newCategoryName, setNewCategoryName] = useState('')
+  const [renamingCategory, setRenamingCategory] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [showMoveToCategory, setShowMoveToCategory] = useState(false)
+  const [moveTargetVideoIds, setMoveTargetVideoIds] = useState<string[]>([])
+
+  // 删除分类确认
+  const [showDeleteCatConfirm, setShowDeleteCatConfirm] = useState<string | null>(null)
+
+  // 排序状态
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'title'>('newest')
+
+  // Toast 通知
+  const [toasts, setToasts] = useState<{ id: number; type: ToastType; message: string }[]>([])
+
+  useEffect(() => {
+    // 注册 toast 监听
+    const handler = (toast: { id: number; type: ToastType; message: string }) => {
+      setToasts(prev => [...prev, toast])
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toast.id)), 3000)
+    }
+    listeners.add(handler)
+    return () => { listeners.delete(handler) }
+  }, [])
+
+  const removeToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id))
+
+  // 键盘快捷键
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ctrl+S 保存编辑
+      if (e.ctrlKey && e.key === 's' && isEditing) { e.preventDefault(); saveEditing() }
+      // Ctrl+K 跳转搜索
+      if (e.ctrlKey && e.key === 'k') { e.preventDefault(); setActiveTab('search') }
+      // Ctrl+L 跳转知识库
+      if (e.ctrlKey && e.key === 'l') { e.preventDefault(); setActiveTab('library') }
+      // Escape 关闭弹窗
+      if (e.key === 'Escape') {
+        if (showDeleteConfirm) setShowDeleteConfirm(false)
+        else if (showMoveToCategory) setShowMoveToCategory(false)
+        else if (showDeleteCatConfirm) setShowDeleteCatConfirm(null)
+        else if (showDetail) { setShowDetail(false); setIsEditing(false) }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [isEditing, showDeleteConfirm, showMoveToCategory, showDeleteCatConfirm, showDetail])
+
+  useEffect(() => { fetchStats(); fetchAllVideos(); fetchCategories() }, [])
+
+  const fetchStats = async () => {
+    try {
+      const response = await fetch(API + '/api/knowledge/stats')
+      const data = await response.json()
+      setStats(data)
+    } catch (error) { console.error('获取统计失败:', error) }
+  }
+
+  const fetchAllVideos = async () => {
+    setIsLoadingLibrary(true)
+    try {
+      const response = await fetch(API + '/api/videos?page=1&page_size=100')
+      const data = await response.json()
+      if (data.videos && data.videos.length > 0) {
+        setVideoResults(data.videos)
+      }
+    } catch (error) { console.error('获取视频列表失败:', error) }
+    setIsLoadingLibrary(false)
+  }
+
+  const fetchCategories = async () => {
+    try {
+      const response = await fetch(API + '/api/categories')
+      const data = await response.json()
+      setCategories(data.categories || [])
+      setUncategorized(data.uncategorized || { name: '未分类', count: 0, videos: [] })
+    } catch (error) { console.error('获取分类失败:', error) }
+  }
+
+  const handleProcessVideo = async () => {
+    if (!videoUrl.trim()) {
+      showToast('info', '请先粘贴视频链接')
+      return
+    }
+    setIsProcessing(true)
+    setProcessingStatus('正在提交处理任务...')
+    setProcessingProgress(0)
+    setProcessingDetail('')
+    try {
+      const response = await fetch(API + '/api/videos/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: videoUrl })
+      })
+      const data = await response.json()
+      if (data.video_id) {
+        setProcessingStatus('视频处理中，请稍候...')
+        pollVideoStatus(data.video_id)
+      } else if (data.detail) {
+        setProcessingStatus('错误: ' + data.detail)
+        setIsProcessing(false)
+      }
+    } catch (error) {
+      setProcessingStatus('处理失败，请检查网络连接')
+      setIsProcessing(false)
+    }
+  }
+
+  // BUG FIX #1: 使用 ref 存储 polling interval，确保组件卸载时清理
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // BUG FIX #1: 组件卸载时清理轮询
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    }
+  }, [])
+
+  const pollVideoStatus = async (videoId: string) => {
+    // BUG FIX #1: 清理之前的轮询（防止重复处理导致多个interval）
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(API + '/api/videos/' + videoId)
+        const data = await response.json()
+        setProcessingProgress(data.progress || 0)
+        setProcessingDetail(data.processing_detail || '')
+        const statusMap: Record<string, string> = { 'downloading': '正在下载视频...', 'extracting': '正在提取音频...', 'transcribing': '正在进行语音转文字...', 'analyzing': '正在进行AI深度分析...', 'completed': '处理完成！', 'failed': '处理失败' }
+        setProcessingStatus(statusMap[data.status] || '处理中...')
+        if (data.status === 'completed') {
+          if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null }
+          setProcessingStatus('处理完成！')
+          setProcessingProgress(100)
+          setIsProcessing(false)
+          setVideoUrl('')
+          setVideoResults(prev => [data, ...prev.filter(v => v.id !== data.id)])
+          fetchStats(); fetchCategories()
+          setSelectedVideo(data); setShowDetail(true)
+          showToast('success', '视频处理完成！已自动打开详情')
+        } else if (data.status === 'failed') {
+          if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null }
+          const errMsg = data.processing_detail || data.error_message || '未知错误'
+          setProcessingStatus('处理失败: ' + errMsg)
+          setIsProcessing(false)
+          showToast('error', '视频处理失败: ' + errMsg)
+        }
+      } catch (error) {
+        if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null }
+        setProcessingStatus('获取状态失败')
+        setIsProcessing(false)
+      }
+    }, 2000)
+  }
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) {
+      showToast('info', '请输入搜索关键词')
+      return
+    }
+    try {
+      const response = await fetch(API + '/api/knowledge/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: searchQuery, limit: 20 })
+      })
+      const data = await response.json()
+      setSearchResults(data.results || [])
+      if (data.results?.length === 0) {
+        showToast('info', '未找到相关内容，试试其他关键词')
+      }
+    } catch (error) {
+      console.error('搜索失败:', error)
+      showToast('error', '搜索失败，请检查网络')
+    }
+  }
+
+  const openVideoDetail = async (videoId: string, startEdit = false) => {
+    try {
+      const response = await fetch(API + '/api/videos/' + videoId)
+      const data = await response.json()
+      setSelectedVideo(data)
+      setShowDetail(true)
+      setShowFullTranscript(false)
+      // 修复竞态：在视频加载完成后直接进入编辑模式
+      if (startEdit) {
+        setEditForm({
+          title: data.title || '',
+          summary: data.summary || '',
+          one_line_summary: data.one_line_summary || '',
+          key_points: [...(data.key_points || [])],
+          tags: [...(data.tags || [])],
+          category: data.category || '',
+          description: data.description || '',
+        })
+        setIsEditing(true)
+      } else {
+        setIsEditing(false)
+      }
+    } catch (error) { console.error('获取视频详情失败:', error) }
+  }
+
+  const copyTranscript = () => {
+    if (selectedVideo?.transcript) {
+      navigator.clipboard.writeText(selectedVideo.transcript).then(() => {
+        setCopied(true)
+        showToast('success', '已复制转录全文到剪贴板')
+        setTimeout(() => setCopied(false), 2000)
+      }).catch(() => showToast('error', '复制失败'))
+    }
+  }
+
+  // ===== 编辑功能 =====
+  const startEditing = () => {
+    if (!selectedVideo) return
+    setEditForm({
+      title: selectedVideo.title || '',
+      summary: selectedVideo.summary || '',
+      one_line_summary: selectedVideo.one_line_summary || '',
+      key_points: [...(selectedVideo.key_points || [])],
+      tags: [...(selectedVideo.tags || [])],
+      category: selectedVideo.category || '',
+      description: selectedVideo.description || '',
+    })
+    setIsEditing(true)
+  }
+
+  const cancelEditing = () => {
+    setIsEditing(false)
+    setEditForm({})
+    setEditKeyPointInput('')
+    setEditTagInput('')
+  }
+
+  const saveEditing = async () => {
+    if (!selectedVideo) return
+    setIsSaving(true)
+    try {
+      const response = await fetch(API + '/api/videos/' + selectedVideo.id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editForm)
+      })
+      const data = await response.json()
+      if (data.success) {
+        setSelectedVideo(data.video)
+        setIsEditing(false)
+        setEditForm({})
+        setVideoResults(prev => prev.map(v => v.id === data.video.id ? { ...v, ...data.video } : v))
+        fetchCategories()
+        fetchStats()
+        showToast('success', '保存成功！知识条目已更新')
+      } else {
+        showToast('error', '保存失败: ' + (data.detail || '未知错误'))
+      }
+    } catch (error) {
+      console.error('保存失败:', error)
+      showToast('error', '保存失败，请检查网络连接')
+    }
+    setIsSaving(false)
+  }
+
+  const addKeyPoint = () => {
+    if (!editKeyPointInput.trim()) return
+    setEditForm(prev => ({ ...prev, key_points: [...(prev.key_points || []), editKeyPointInput.trim()] }))
+    setEditKeyPointInput('')
+  }
+
+  const removeKeyPoint = (index: number) => {
+    setEditForm(prev => ({ ...prev, key_points: (prev.key_points || []).filter((_, i) => i !== index) }))
+  }
+
+  const addTag = () => {
+    if (!editTagInput.trim()) return
+    const newTag = editTagInput.trim().replace(/^#/, '')
+    if (newTag && !(editForm.tags || []).includes(newTag)) {
+      setEditForm(prev => ({ ...prev, tags: [...(prev.tags || []), newTag] }))
+    }
+    setEditTagInput('')
+  }
+
+  const removeTag = (index: number) => {
+    setEditForm(prev => ({ ...prev, tags: (prev.tags || []).filter((_, i) => i !== index) }))
+  }
+
+  // ===== 删除功能 =====
+  const confirmDelete = (video: VideoResult) => {
+    setDeleteTarget(video)
+    setShowDeleteConfirm(true)
+  }
+
+  const executeDelete = async () => {
+    if (!deleteTarget) return
+    setIsDeleting(true)
+    try {
+      const response = await fetch(API + '/api/videos/' + deleteTarget.id, { method: 'DELETE' })
+      const data = await response.json()
+      if (data.success) {
+        const title = deleteTarget.title
+        setVideoResults(prev => prev.filter(v => v.id !== deleteTarget.id))
+        setShowDeleteConfirm(false)
+        setDeleteTarget(null)
+        setShowDetail(false)
+        setSelectedVideo(null)
+        fetchStats()
+        fetchCategories()
+        showToast('success', `已删除「${title}」`)
+      }
+    } catch (error) {
+      console.error('删除失败:', error)
+      showToast('error', '删除失败，请重试')
+    }
+    setIsDeleting(false)
+  }
+
+  const toggleSelectVideo = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const selectAllVideos = () => {
+    const filtered = getFilteredVideos()
+    if (selectedIds.size === filtered.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(filtered.map(v => v.id)))
+    }
+  }
+
+  const batchDelete = async () => {
+    if (selectedIds.size === 0) return
+    setIsDeleting(true)
+    try {
+      const response = await fetch(API + '/api/videos/delete-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: Array.from(selectedIds) })
+      })
+      const data = await response.json()
+      if (data.success) {
+        const count = data.deleted_count || selectedIds.size
+        setVideoResults(prev => prev.filter(v => !selectedIds.has(v.id)))
+        setSelectedIds(new Set())
+        setShowBatchActions(false)
+        fetchStats()
+        fetchCategories()
+        showToast('success', `已批量删除 ${count} 个视频`)
+      }
+    } catch (error) {
+      console.error('批量删除失败:', error)
+      showToast('error', '批量删除失败，请重试')
+    }
+    setIsDeleting(false)
+  }
+
+  const batchMoveToCategory = async (categoryName: string) => {
+    if (selectedIds.size === 0) return
+    try {
+      const response = await fetch(API + '/api/categories/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_ids: Array.from(selectedIds), target_category: categoryName })
+      })
+      const data = await response.json()
+      if (data.success) {
+        setVideoResults(prev => prev.map(v => selectedIds.has(v.id) ? { ...v, category: categoryName } : v))
+        const count = selectedIds.size
+        setSelectedIds(new Set())
+        setShowMoveToCategory(false)
+        fetchCategories()
+        fetchStats()
+        showToast('success', `已将 ${count} 个视频移入「${categoryName || '未分类'}」`)
+      }
+    } catch (error) {
+      console.error('移动分类失败:', error)
+      showToast('error', '移动失败，请重试')
+    }
+  }
+
+  // ===== 分类管理 =====
+  const createCategory = async () => {
+    if (!newCategoryName.trim()) return
+    try {
+      await fetch(API + '/api/categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newCategoryName.trim() })
+      })
+      showToast('success', `分类「${newCategoryName.trim()}」已创建`)
+      setNewCategoryName('')
+      fetchCategories()
+    } catch (error) {
+      console.error('创建分类失败:', error)
+      showToast('error', '创建分类失败')
+    }
+  }
+
+  const renameCategory = async (oldName: string) => {
+    if (!renameValue.trim() || renameValue === oldName) { setRenamingCategory(null); return }
+    try {
+      await fetch(API + '/api/categories/' + encodeURIComponent(oldName), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_name: renameValue.trim() })
+      })
+      showToast('success', `分类已重命名：${oldName} → ${renameValue.trim()}`)
+      setRenamingCategory(null)
+      setRenameValue('')
+      fetchCategories()
+      fetchAllVideos()
+      fetchStats()
+    } catch (error) {
+      console.error('重命名分类失败:', error)
+      showToast('error', '重命名失败')
+    }
+  }
+
+  const deleteCategory = async (name: string) => {
+    try {
+      await fetch(API + '/api/categories/' + encodeURIComponent(name), { method: 'DELETE' })
+      showToast('success', `分类「${name}」已删除，视频已移入未分类`)
+      setShowDeleteCatConfirm(null)
+      if (selectedCategory === name) setSelectedCategory(null)
+      fetchCategories()
+      fetchAllVideos()
+      fetchStats()
+    } catch (error) {
+      console.error('删除分类失败:', error)
+      showToast('error', '删除分类失败')
+    }
+  }
+
+  // 过滤并排序视频列表
+  const getFilteredVideos = () => {
+    let list = videoResults
+    if (selectedCategory === null) list = videoResults
+    else if (selectedCategory === '') list = videoResults.filter(v => !v.category)
+    else list = videoResults.filter(v => v.category === selectedCategory)
+
+    // 排序
+    if (sortBy === 'newest') list = [...list].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    else if (sortBy === 'oldest') list = [...list].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    else if (sortBy === 'title') list = [...list].sort((a, b) => (a.title || '').localeCompare(b.title || ''))
+
+    return list
+  }
+
+  const getPlatformIcon = (platform: string) => {
+    const icons: Record<string, string> = { 'douyin': '🎵', 'bilibili': '📺', 'youtube': '▶️', 'kuaishou': '🎬', 'tiktok': '🎭', 'xiaohongshu': '📕', 'weixin_video': '💬', 'unknown': '🎥' }
+    return icons[platform] || '🎥'
+  }
+
+  const getPlatformName = (platform: string) => {
+    const names: Record<string, string> = { 'douyin': '抖音', 'bilibili': 'B站', 'youtube': 'YouTube', 'kuaishou': '快手', 'tiktok': 'TikTok', 'xiaohongshu': '小红书', 'weixin_video': '微信视频号', 'unknown': '未知' }
+    return names[platform] || platform
+  }
+
+  const getStatusColor = (status: string) => {
+    const colors: Record<string, string> = { 'completed': 'bg-green-100 text-green-700', 'processing': 'bg-blue-100 text-blue-700', 'downloading': 'bg-yellow-100 text-yellow-700', 'extracting': 'bg-yellow-100 text-yellow-700', 'transcribing': 'bg-yellow-100 text-yellow-700', 'analyzing': 'bg-purple-100 text-purple-700', 'pending': 'bg-gray-100 text-gray-700', 'failed': 'bg-red-100 text-red-700' }
+    return colors[status] || 'bg-gray-100 text-gray-700'
+  }
+
+  const getStatusText = (status: string) => {
+    const texts: Record<string, string> = { 'completed': '已完成', 'downloading': '下载中', 'extracting': '提取中', 'transcribing': '转录中', 'analyzing': '分析中', 'pending': '等待中', 'failed': '失败' }
+    return texts[status] || status
+  }
+
+  // 相对时间格式化
+  const formatRelativeTime = (dateString: string) => {
+    const date = new Date(dateString)
+    const now = new Date()
+    const diff = now.getTime() - date.getTime()
+    const seconds = Math.floor(diff / 1000)
+    const minutes = Math.floor(seconds / 60)
+    const hours = Math.floor(minutes / 60)
+    const days = Math.floor(hours / 24)
+    if (days > 0) return days + '天前'
+    if (hours > 0) return hours + '小时前'
+    if (minutes > 0) return minutes + '分钟前'
+    return '刚刚'
+  }
+
+  // 复制全部知识条目
+  const copyAllResults = () => {
+    const text = filteredVideos.map(v => {
+      const parts = ['📌 ' + (v.title || '未标题')]
+      if (v.one_line_summary) parts.push('💡 ' + v.one_line_summary)
+      if (v.summary) parts.push('📝 ' + v.summary)
+      if (v.key_points?.length) parts.push('🔑 关键点：\n' + v.key_points.map((p, i) => (i+1) + '. ' + p).join('\n'))
+      if (v.tags?.length) parts.push('🏷️ ' + v.tags.map(t => '#' + t).join(' '))
+      parts.push('---')
+      return parts.join('\n')
+    }).join('\n\n')
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('success', `已复制 ${filteredVideos.length} 条知识到剪贴板`)
+    }).catch(() => showToast('error', '复制失败'))
+  }
+
+  const filteredVideos = getFilteredVideos()
+
+  return (
+    <div className="min-h-screen transition-colors duration-300">
+      {/* 主题切换按钮 */}
+      <ThemeToggle />
+      <div className="max-w-7xl mx-auto px-4 py-6">
+        {/* Header */}
+        <header className="text-center mb-8 animate-fade-in-up">
+          <div className="flex items-center justify-center gap-3 mb-3">
+            <div className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-custom-glow"><Brain className="w-7 h-7 text-white" /></div>
+            <h1 className="text-4xl font-bold text-gradient">VideoBrain</h1>
+            <span className="tag tag-purple mt-1">v2.6</span>
+          </div>
+          <p className="text-base text-ink-muted max-w-xl mx-auto">短视频智能知识库 — 一键提取视频内容，AI 生成结构化知识</p>
+          <div className="flex justify-center gap-6 mt-5">
+            <div className="glass rounded-xl shadow-custom-sm p-3 px-6 text-center"><div className="text-2xl font-bold text-ink">{stats.total_entries}</div><div className="text-xs text-ink-muted">知识条目</div></div>
+            <div className="glass rounded-xl shadow-custom-sm p-3 px-6 text-center"><div className="text-2xl font-bold text-ink">{stats.category_count}</div><div className="text-xs text-ink-muted">知识分类</div></div>
+            <div className="glass rounded-xl shadow-custom-sm p-3 px-6 text-center"><div className="text-2xl font-bold text-ink">7+</div><div className="text-xs text-ink-muted">支持平台</div></div>
+          </div>
+        </header>
+
+        {/* Tabs */}
+        <div className="flex justify-center mb-6">
+          <div className="glass rounded-full shadow-custom-sm p-1 flex gap-1">
+            {[{ key: 'process', icon: Zap, label: '处理视频' }, { key: 'search', icon: Search, label: '搜索知识' }, { key: 'library', icon: BookOpen, label: '知识库' }].map(tab => (
+              <button key={tab.key} onClick={() => setActiveTab(tab.key as any)} className={'px-5 py-2 rounded-full transition-all text-sm font-medium text-ink-secondary ' + (activeTab === tab.key ? 'btn-primary shadow-md' : 'text-ink-muted hover:bg-[var(--glass-bg)]')}>
+                <div className="flex items-center gap-1.5"><tab.icon className="w-4 h-4" />{tab.label}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Process Tab */}
+        {activeTab === 'process' && (
+          <div className="max-w-3xl mx-auto">
+            <div className="card-custom p-6">
+              <h2 className="text-xl font-semibold mb-4 flex items-center gap-2 text-ink"><Link className="w-5 h-5 text-indigo-600" />输入视频链接</h2>
+              <div className="flex gap-3 mb-3">
+                <input type="text" value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="粘贴视频链接或抖音分享文本（支持抖音、B站、YouTube、微信视频号等）..." className="flex-1 input-custom py-3" disabled={isProcessing} onKeyDown={(e) => e.key === 'Enter' && !isProcessing && handleProcessVideo()} />
+                <button onClick={async () => { try { const text = await navigator.clipboard.readText(); if (text) setVideoUrl(text) } catch {} }} disabled={isProcessing} className="btn-secondary px-3 py-3 text-sm" title="从剪贴板粘贴">
+                  <Copy className="w-4 h-4" />
+                </button>
+                <button onClick={handleProcessVideo} disabled={isProcessing || !videoUrl.trim()} className="btn-primary px-6 py-3 text-sm">
+                  {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" />处理中</> : <><Zap className="w-4 h-4" />开始处理</>}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2 mb-4">
+                {[{ name: '抖音', icon: '🎵', pattern: /douyin|iesdouyin|v\.douyin/ }, { name: 'B站', icon: '📺', pattern: /bilibili|b23\.tv/ }, { name: 'YouTube', icon: '▶️', pattern: /youtube|youtu\.be/ }, { name: '快手', icon: '🎬', pattern: /kuaishou|gifshow/ }, { name: 'TikTok', icon: '🎭', pattern: /tiktok/ }, { name: '小红书', icon: '📕', pattern: /xiaohongshu|xhslink/ }, { name: '视频号', icon: '💬', pattern: /weixin|wxurl|sourl/ }].map(p => {
+                  const isDetected = videoUrl && p.pattern.test(videoUrl.toLowerCase())
+                  return (
+                    <span key={p.name} className={'px-3 py-1 rounded-full text-xs transition-all ' + (isDetected ? 'tag tag-purple font-medium' : 'tag')}>{p.icon} {p.name}</span>
+                  )
+                })}
+              </div>
+              {processingStatus && (
+                <div className={'p-4 rounded-xl ' + (processingStatus.includes('完成') ? 'status-success' : processingStatus.includes('失败') || processingStatus.includes('错误') ? 'status-error' : 'status-success')}>
+                  <div className="flex items-center gap-2 mb-2">
+                    {processingStatus.includes('完成') ? <CheckCircle className="w-5 h-5" /> : processingStatus.includes('失败') || processingStatus.includes('错误') ? <AlertCircle className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />}
+                    <span className={'font-medium}>{processingStatus}</span>
+                  </div>
+                  {isProcessing && processingProgress > 0 && (
+                    <div className="mb-2">
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-xs text-ink-muted">进度</span>
+                        <span className="text-xs font-bold text-indigo-600">{processingProgress}%</span>
+                      </div>
+                      <div className="w-full progress-bar h-2.5"><div className="progress-fill h-2.5 rounded-full transition-all duration-500" style={{ width: processingProgress + '%' }}></div></div>
+                    </div>
+                  )}
+                  {processingDetail && <p className="text-sm text-ink-secondary">{processingDetail}</p>}
+                </div>
+              )}
+            </div>
+            <div className="mt-6 card-custom p-6">
+              <h3 className="text-sm font-semibold mb-4 text-ink-secondary">处理流程</h3>
+              <div className="grid grid-cols-5 gap-3">
+                {[{ icon: Link, label: '解析链接', desc: '识别平台', progress: [10] }, { icon: Download, label: '下载视频', desc: '获取源文件', progress: [10, 20, 25] }, { icon: FileText, label: '语音转文字', desc: 'Whisper引擎', progress: [35, 40, 45, 55] }, { icon: Brain, label: 'AI深度分析', desc: 'MiMo模型', progress: [70] }, { icon: BookOpen, label: '知识入库', desc: '结构化存储', progress: [100] }].map((step, i) => {
+                  const isActive = isProcessing && step.progress.some(p => processingProgress >= p - 5 && processingProgress < p + 15)
+                  const isDone = isProcessing && processingProgress > Math.max(...step.progress) + 10 || (!isProcessing && processingProgress === 100 && i < 5)
+                  return (
+                    <div key={i} className="text-center">
+                      <div className={'w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-2 transition-all ' + (isActive ? 'shadow-custom-glow animate-pulse' : isDone ? '' : '')}>
+                        <step.icon className={'w-5 h-5 ' + (isActive ? 'text-indigo-700' : isDone ? 'text-[var(--tag-green-text)]' : 'text-indigo-600')} />
+                      </div>
+                      <div className={'font-medium text-xs ' + (isActive ? 'text-indigo-700' : isDone ? 'text-green-700' : 'text-gray-800')}>{step.label}</div>
+                      <div className="text-[10px] text-gray-500">{step.desc}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Search Tab */}
+        {activeTab === 'search' && (
+          <div className="max-w-4xl mx-auto">
+            <div className="card-custom p-6 mb-6">
+              <h2 className="text-xl font-semibold mb-4 flex items-center gap-2 text-ink"><Search className="w-5 h-5 text-indigo-600" />搜索知识库</h2>
+              <div className="flex gap-3">
+                <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="输入关键词搜索知识库..." className="flex-1 px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm" onKeyDown={(e) => e.key === 'Enter' && handleSearch()} />
+                <button onClick={handleSearch} className="btn-primary px-6 py-3 text-sm">搜索</button>
+              </div>
+            </div>
+            {searchResults.length > 0 && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-ink-secondary">找到 {searchResults.length} 条相关知识</h3>
+                {searchResults.map((result, i) => (
+                  <div key={i} className="card-custom p-5 cursor-pointer" onClick={() => { const vid = videoResults.find(v => v.id === result.metadata.video_id); if (vid) openVideoDetail(vid.id); }}>
+                    <div className="flex items-start justify-between mb-2">
+                      <h4 className="text-base font-semibold text-ink">{result.metadata.title || '未命名'}</h4>
+                      <span className={'px-2 py-1 rounded-full text-xs font-medium ' + (result.similarity >= 0.7 ? 'tag tag-green' : result.similarity >= 0.4 ? 'tag tag-amber' : 'tag')}>{(result.similarity * 100).toFixed(0)}%匹配</span>
+                    </div>
+                    <p className="text-sm text-ink-secondary mb-3 line-clamp-2">{result.metadata.summary || result.metadata.one_line_summary || result.content?.substring(0, 150) || '暂无摘要'}</p>
+                    <div className="flex items-center gap-3 text-xs text-ink-muted">
+                      <span>{getPlatformIcon(result.metadata.source_platform)} {getPlatformName(result.metadata.source_platform)}</span>
+                      <span className="tag">{result.metadata.category}</span>
+                      {result.metadata.has_transcript && <span className="text-[var(--tag-green-text)]">📄 含全文</span>}
+                      {result.metadata.source_url && (
+                        <a href={result.metadata.source_url} target="_blank" rel="noopener noreferrer" className="text-ink-muted hover:text-ink flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
+                          <ExternalLink className="w-3 h-3" />原视频
+                        </a>
+                      )}
+                    </div>
+                    {/* 搜索结果标签 */}
+                    {result.metadata.tags && (() => {
+                      try {
+                        const tags = JSON.parse(result.metadata.tags)
+                        if (Array.isArray(tags) && tags.length > 0) {
+                          return (
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              {tags.slice(0, 5).map((tag: string, i: number) => (
+                                <span key={i} className="tag tag-purple">#{tag}</span>
+                              ))}
+                            </div>
+                          )
+                        }
+                      } catch {}
+                      return null
+                    })()}
+                  </div>
+                ))}
+              </div>
+            )}
+            {searchResults.length === 0 && searchQuery && (
+              <div className="text-center py-12 text-ink-muted"><Search className="w-10 h-10 mx-auto mb-3 opacity-40" /><p className="text-sm">未找到相关知识</p></div>
+            )}
+          </div>
+        )}
+
+        {/* Library Tab - with Category Sidebar */}
+        {activeTab === 'library' && (
+          <div className="max-w-6xl mx-auto">
+            <div className="flex gap-5">
+              {/* Category Sidebar */}
+              <div className="w-56 flex-shrink-0">
+                <div className="card-custom p-4 sticky top-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-bold text-ink flex items-center gap-1.5"><Folder className="w-4 h-4 text-indigo-500" />内容分区</h3>
+                    <button onClick={() => setShowCategoryManager(!showCategoryManager)} className="text-indigo-600 hover:text-indigo-800" title="管理分类"><FolderPlus className="w-4 h-4" /></button>
+                  </div>
+
+                  {/* All categories */}
+                  <div className="space-y-1">
+                    <button onClick={() => setSelectedCategory(null)} className={'w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between border-l-2 ' + (selectedCategory === null ? 'sidebar-item active' : 'sidebar-item')}>
+                      <span>📋 全部</span>
+                      <span className="text-xs bg-[var(--sidebar-badge-bg)] px-2 py-0.5 rounded-full">{videoResults.length}</span>
+                    </button>
+                    {categories.map((cat) => (
+                      <div key={cat.name} className="group">
+                        {renamingCategory === cat.name ? (
+                          <div className="flex items-center gap-1 px-1">
+                            <input value={renameValue} onChange={(e) => setRenameValue(e.target.value)} className="flex-1 px-2 py-1 text-xs border rounded" autoFocus onKeyDown={(e) => e.key === 'Enter' && renameCategory(cat.name)} onBlur={() => setRenamingCategory(null)} />
+                            <button onClick={() => renameCategory(cat.name)} className="text-[var(--tag-green-text)]"><Check className="w-3 h-3" /></button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setSelectedCategory(cat.name)} className={'w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between border-l-2 ' + (selectedCategory === cat.name ? 'bg-indigo-50 text-indigo-700 font-medium border-indigo-500' : 'text-gray-600 hover:bg-gray-50 border-transparent')}>
+                            <span className="flex items-center gap-1.5 truncate">
+                              <FolderOpen className="w-3.5 h-3.5 flex-shrink-0" />
+                              <span className="truncate">{cat.name}</span>
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs bg-[var(--sidebar-badge-bg)] px-2 py-0.5 rounded-full">{cat.count}</span>
+                              <button onClick={(e) => { e.stopPropagation(); setRenamingCategory(cat.name); setRenameValue(cat.name) }} className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-opacity"><Edit3 className="w-3 h-3" /></button>
+                              <button onClick={(e) => { e.stopPropagation(); setShowDeleteCatConfirm(cat.name) }} className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-600 transition-opacity"><Trash2 className="w-3 h-3" /></button>
+                            </div>
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {uncategorized.count > 0 && (
+                      <button onClick={() => setSelectedCategory('')} className={'w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between border-l-2 ' + (selectedCategory === '' ? 'sidebar-item active' : 'sidebar-item')}>
+                        <span>📁 未分类</span>
+                        <span className="text-xs bg-[var(--sidebar-badge-bg)] px-2 py-0.5 rounded-full">{uncategorized.count}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Create new category */}
+                  {showCategoryManager && (
+                    <div className="mt-3 pt-3 border-t border-gray-100">
+                      <div className="flex gap-1">
+                        <input value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} placeholder="新分类名..." className="flex-1 px-2 py-1.5 text-xs border rounded-lg" onKeyDown={(e) => e.key === 'Enter' && createCategory()} />
+                        <button onClick={createCategory} className="px-2 py-1.5 bg-indigo-600 text-white rounded-lg text-xs"><Plus className="w-3 h-3" /></button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Batch actions when items selected */}
+                  {selectedIds.size > 0 && (
+                    <div className="mt-3 pt-3 border-t border-gray-100 space-y-2">
+                      <p className="text-xs text-ink-muted">已选 {selectedIds.size} 项</p>
+                      <button onClick={() => setShowMoveToCategory(true)} className="w-full text-left px-3 py-1.5 text-xs text-indigo-600 hover:bg-indigo-50 rounded-lg flex items-center gap-1.5"><Move className="w-3 h-3" />移动到分类</button>
+                      <button onClick={() => {
+                        if (confirm(`确定要删除选中的 ${selectedIds.size} 个视频吗？此操作不可撤销。`)) batchDelete()
+                      }} className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-1.5"><Trash2 className="w-3 h-3" />批量删除</button>
+                      <button onClick={() => setSelectedIds(new Set())} className="w-full text-left px-3 py-1.5 text-xs text-ink-muted hover:bg-gray-50 rounded-lg">取消选择</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Main content area */}
+              <div className="flex-1 min-w-0">
+                <div className="card-custom p-6">
+                  <div className="flex items-center justify-between mb-5">
+                    <div>
+                      <h2 className="text-xl font-semibold flex items-center gap-2 text-ink">
+                        <BookOpen className="w-5 h-5 text-indigo-600" />
+                        {selectedCategory === null ? '全部知识' : selectedCategory === '' ? '未分类' : selectedCategory}
+                        <span className="text-sm font-normal text-ink-muted">({filteredVideos.length})</span>
+                      </h2>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {filteredVideos.length > 0 && (
+                        <>
+                          <button onClick={selectAllVideos} className="text-xs text-ink-muted hover:text-indigo-600 px-2 py-1">
+                            {selectedIds.size === filteredVideos.length ? '取消全选' : '全选'}
+                          </button>
+                          <button onClick={copyAllResults} className="flex items-center gap-1 text-xs text-ink-muted hover:text-[var(--tag-green-text)] px-2 py-1" title="复制当前分类下的所有知识内容"><Copy className="w-3 h-3" />复制全部</button>
+                          <button onClick={() => {
+                            const exportData = filteredVideos.map(v => ({
+                              title: v.title,
+                              url: v.url,
+                              platform: v.platform,
+                              category: v.category,
+                              summary: v.summary,
+                              one_line_summary: v.one_line_summary,
+                              key_points: v.key_points,
+                              tags: v.tags,
+                              transcript: v.transcript
+                            }))
+                            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+                            const url = URL.createObjectURL(blob)
+                            const a = document.createElement('a'); a.href = url; a.download = 'videobrain-export.json'; a.click()
+                            URL.revokeObjectURL(url)
+                            showToast('success', `已导出 ${filteredVideos.length} 条知识`)
+                          }} className="flex items-center gap-1 text-xs text-ink-muted hover:text-purple-600 px-2 py-1" title="导出为JSON文件"><Download className="w-3 h-3" />导出</button>
+                        </>
+                      )}
+                      <select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)} className="text-xs text-ink-muted border rounded px-1 py-0.5 bg-white">
+                        <option value="newest">最新</option>
+                        <option value="oldest">最早</option>
+                        <option value="title">按标题</option>
+                      </select>
+                      <button onClick={() => { fetchAllVideos(); fetchStats(); fetchCategories() }} className="btn-ghost text-sm">刷新</button>
+                    </div>
+                  </div>
+
+                  {filteredVideos.length > 0 ? (
+                    <div className="space-y-3">
+                      {filteredVideos.map((video) => (
+                        <div key={video.id} className={'card-custom p-5 group ' + (selectedIds.has(video.id) ? 'border-[var(--hairline-active)]' : '')}>
+                          <div className="flex items-start gap-3">
+                            {/* Checkbox */}
+                            <input type="checkbox" checked={selectedIds.has(video.id)} onChange={() => toggleSelectVideo(video.id)} className="mt-1 w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 cursor-pointer" />
+
+                            {/* Content */}
+                            <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openVideoDetail(video.id)}>
+                              <div className="flex items-start justify-between mb-2">
+                                <h4 className="text-base font-semibold text-ink mb-1">{video.title}</h4>
+                                <span className="text-xs text-ink-muted flex-shrink-0 ml-2">{formatRelativeTime(video.created_at)}</span>
+                              </div>
+                              <div className="flex items-center gap-2 text-xs text-ink-muted mb-2">
+                                <span>{getPlatformIcon(video.platform)} {getPlatformName(video.platform)}</span>
+                                <span className={'tag ' + (video.status === 'completed' ? 'tag-green' : video.status === 'failed' ? 'tag-red' : 'tag-amber')}>{getStatusText(video.status)}</span>
+                                {video.category && <span className="tag tag-purple">{video.category}</span>}
+                                {video.has_transcript && <span className="text-[var(--tag-green-text)]">📄 {video.transcript_length || 0}字</span>}
+                              </div>
+                              {video.one_line_summary && <p className="text-sm text-ink-secondary mb-2">{video.one_line_summary}</p>}
+                              {video.summary && <p className="text-xs text-ink-muted line-clamp-2 mb-3">{video.summary}</p>}
+                              {video.key_points && video.key_points.length > 0 && (
+                                <div className="mb-3">
+                                  <ul className="space-y-0.5">
+                                    {video.key_points.slice(0, 3).map((point: string, i: number) => (
+                                      <li key={i} className="text-xs text-ink-secondary flex items-start gap-1.5"><span className="text-[var(--primary-light)] mt-0.5">•</span>{point}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {video.tags && video.tags.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {video.tags.slice(0, 5).map((tag: string, i: number) => (
+                                    <span key={i} className="tag tag-purple">#{tag}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Action buttons */}
+                            <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                              <button onClick={(e) => { e.stopPropagation(); openVideoDetail(video.id, true) }} className="p-1.5 text-ink-muted hover:text-[var(--primary)] hover:bg-[var(--tag-purple-bg)] rounded-lg" title="编辑"><Edit3 className="w-4 h-4" /></button>
+                              <button onClick={(e) => { e.stopPropagation(); confirmDelete(video) }} className="p-1.5 text-ink-muted hover:text-[var(--tag-red-text)] hover:bg-[var(--tag-red-bg)] rounded-lg" title="删除"><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-12 text-ink-muted">
+                      <BookOpen className="w-12 h-12 mx-auto mb-4 opacity-30" />
+                      {isLoadingLibrary ? (
+                        <><p className="text-sm font-medium text-ink-secondary">正在加载知识库...</p><Loader2 className="w-5 h-5 animate-spin mx-auto mt-2 text-[var(--primary)]" /></>
+                      ) : selectedCategory !== null ? (
+                        <><p className="text-sm font-medium text-ink-secondary">该分类下暂无内容</p><p className="text-xs mt-1 text-ink-muted">尝试切换到其他分类或处理新的视频</p></>
+                      ) : (
+                        <><p className="text-sm font-medium text-ink-secondary">知识库为空</p><p className="text-xs mt-1 text-ink-muted">切换到「处理视频」标签页，粘贴视频链接开始构建你的知识库 🚀</p></>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Detail Modal with Edit Support */}
+        {showDetail && selectedVideo && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-start justify-center pt-8 pb-8 overflow-y-auto" onClick={() => { setShowDetail(false); setIsEditing(false) }}>
+            <div className="card-custom shadow-custom-lg max-w-3xl w-full mx-4 my-auto" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className="sticky top-0 rounded-t-2xl border-b border-[var(--hairline)] p-5 flex items-start justify-between z-10 bg-[var(--surface-1)]">
+                <div className="flex-1 mr-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">{getPlatformIcon(selectedVideo.platform)}</span>
+                    <span className="text-xs text-ink-muted">{getPlatformName(selectedVideo.platform)}</span>
+                    {selectedVideo.category && <span className="tag tag-purple text-xs">{selectedVideo.category}</span>}
+                  </div>
+                  {isEditing ? (
+                    <input value={editForm.title || ''} onChange={(e) => setEditForm(prev => ({ ...prev, title: e.target.value }))} className="text-xl font-bold text-ink w-full border-b-2 border-indigo-300 focus:border-indigo-500 outline-none pb-1" />
+                  ) : (
+                    <h2 className="text-xl font-bold text-ink">{selectedVideo.title}</h2>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {!isEditing && (
+                    <>
+                      <button onClick={startEditing} className="btn-ghost text-xs px-3 py-1.5"><Edit3 className="w-3 h-3" />编辑</button>
+                      <button onClick={() => confirmDelete(selectedVideo)} className="btn-ghost text-xs px-3 py-1.5 text-[var(--tag-red-text)]"><Trash2 className="w-3 h-3" />删除</button>
+                    </>
+                  )}
+                  {isEditing && (
+                    <>
+                      <button onClick={saveEditing} disabled={isSaving} className="btn-primary text-xs px-3 py-1.5"><Save className="w-3 h-3" />{isSaving ? '保存中...' : '保存'}</button>
+                      <button onClick={cancelEditing} className="btn-secondary text-xs px-3 py-1.5">取消</button>
+                    </>
+                  )}
+                  <button onClick={() => { setShowDetail(false); setIsEditing(false) }} className="w-8 h-8 bg-[var(--surface-2)] hover:bg-[var(--surface-3)] rounded-full flex items-center justify-center transition-colors"><X className="w-4 h-4" /></button>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-5 max-h-[70vh] overflow-y-auto">
+                {/* Edit: Category */}
+                {isEditing && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-ink-secondary mb-2 flex items-center gap-1.5"><Folder className="w-4 h-4 text-purple-500" />分类</h3>
+                    <div className="flex gap-2 flex-wrap">
+                      {categories.map(cat => (
+                        <button key={cat.name} onClick={() => setEditForm(prev => ({ ...prev, category: cat.name }))} className={'px-3 py-1.5 rounded-full text-xs transition-colors ' + (editForm.category === cat.name ? 'tag tag-purple font-medium' : 'tag')}>{cat.name}</button>
+                      ))}
+                      <button onClick={() => setEditForm(prev => ({ ...prev, category: '' }))} className={'px-3 py-1.5 rounded-full text-xs transition-colors ' + (editForm.category === '' ? 'tag font-medium' : 'tag')}>无分类</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Edit: One-line summary */}
+                {isEditing && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-ink-secondary mb-2">一句话摘要</h3>
+                    <input value={editForm.one_line_summary || ''} onChange={(e) => setEditForm(prev => ({ ...prev, one_line_summary: e.target.value }))} className="input-custom w-full py-2" placeholder="一句话描述视频内容..." />
+                  </div>
+                )}
+
+                {/* Summary */}
+                <div>
+                  <h3 className="text-sm font-semibold text-ink-secondary mb-2 flex items-center gap-1.5"><Brain className="w-4 h-4 text-indigo-500" />AI 深度摘要</h3>
+                  {isEditing ? (
+                    <textarea value={editForm.summary || ''} onChange={(e) => setEditForm(prev => ({ ...prev, summary: e.target.value }))} rows={4} className="input-custom w-full py-2 resize-y" />
+                  ) : selectedVideo.summary ? (
+                    <div className="bg-[var(--tag-purple-bg)] rounded-xl p-4"><p className="text-sm text-ink-secondary leading-relaxed whitespace-pre-wrap">{selectedVideo.summary}</p></div>
+                  ) : null}
+                </div>
+
+                {/* Key Points */}
+                <div>
+                  <h3 className="text-sm font-semibold text-ink-secondary mb-2 flex items-center gap-1.5"><Zap className="w-4 h-4 text-yellow-500" />关键要点</h3>
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      {(editForm.key_points || []).map((point, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <span className="w-5 h-5 bg-[var(--tag-amber-bg)] text-[var(--tag-amber-text)] rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">{i + 1}</span>
+                          <input value={point} onChange={(e) => { const kp = [...(editForm.key_points || [])]; kp[i] = e.target.value; setEditForm(prev => ({ ...prev, key_points: kp })) }} className="input-custom flex-1 py-1 text-sm" />
+                          <button onClick={() => removeKeyPoint(i)} className="text-[var(--tag-red-text)] hover:text-[var(--tag-red-text)]"><X className="w-4 h-4" /></button>
+                        </div>
+                      ))}
+                      <div className="flex gap-2">
+                        <input value={editKeyPointInput} onChange={(e) => setEditKeyPointInput(e.target.value)} placeholder="添加新的关键点..." className="input-custom flex-1 py-1.5 text-sm" onKeyDown={(e) => e.key === 'Enter' && addKeyPoint()} />
+                        <button onClick={addKeyPoint} className="btn-secondary text-xs px-3 py-1.5"><Plus className="w-4 h-4" /></button>
+                      </div>
+                    </div>
+                  ) : selectedVideo.key_points && selectedVideo.key_points.length > 0 ? (
+                    <div className="space-y-2">
+                      {selectedVideo.key_points.map((point: string, i: number) => (
+                        <div key={i} className="flex items-start gap-3 bg-[var(--tag-purple-bg)] rounded-lg p-3">
+                          <span className="w-5 h-5 bg-[var(--tag-amber-bg)] text-[var(--tag-amber-text)] rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">{i + 1}</span>
+                          <span className="text-sm text-ink-secondary">{point}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Tags */}
+                <div>
+                  <h3 className="text-sm font-semibold text-ink-secondary mb-2 flex items-center gap-1.5"><Tag className="w-4 h-4 text-green-500" />标签</h3>
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        {(editForm.tags || []).map((tag, i) => (
+                          <span key={i} className="tag tag-green text-xs px-3 py-1 flex items-center gap-1">#{tag}<button onClick={() => removeTag(i)} className="text-[var(--tag-green-text)] hover:text-[var(--tag-green-text)] ml-1"><X className="w-3 h-3" /></button></span>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <input value={editTagInput} onChange={(e) => setEditTagInput(e.target.value)} placeholder="添加标签..." className="input-custom flex-1 py-1.5 text-sm" onKeyDown={(e) => e.key === 'Enter' && addTag()} />
+                        <button onClick={addTag} className="btn-secondary text-xs px-3 py-1.5"><Plus className="w-4 h-4" /></button>
+                      </div>
+                    </div>
+                  ) : selectedVideo.tags && selectedVideo.tags.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {selectedVideo.tags.map((tag: string, i: number) => (
+                        <span key={i} className="tag tag-green text-xs px-3 py-1">#{tag}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Full Transcript */}
+                {selectedVideo.has_transcript && selectedVideo.transcript && (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-sm font-semibold text-ink-secondary flex items-center gap-1.5"><FileText className="w-4 h-4 text-blue-500" />完整内容文本 <span className="text-xs font-normal text-ink-muted">({selectedVideo.transcript_length || selectedVideo.transcript.length}字)</span></h3>
+                      <div className="flex gap-2">
+                        <button onClick={copyTranscript} className="btn-ghost text-xs px-3 py-1"><Copy className="w-3 h-3" />{copied ? '已复制!' : '复制全文'}</button>
+                        {!isEditing && (
+                          <button onClick={() => setShowFullTranscript(!showFullTranscript)} className="btn-ghost text-xs px-3 py-1">
+                            {showFullTranscript ? <><ChevronUp className="w-3 h-3" />收起</> : <><ChevronDown className="w-3 h-3" />展开全文</>}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className={'bg-gray-50 rounded-xl p-4 text-sm text-ink-secondary leading-relaxed whitespace-pre-wrap ' + (showFullTranscript || isEditing ? '' : 'max-h-40 overflow-hidden relative')}>
+                      {selectedVideo.transcript}
+                      {!showFullTranscript && !isEditing && selectedVideo.transcript.length > 300 && <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-[var(--surface-2)] to-transparent"></div>}
+                    </div>
+                  </div>
+                )}
+
+                {/* No Transcript */}
+                {(!selectedVideo.has_transcript || !selectedVideo.transcript) && selectedVideo.status === 'completed' && (
+                  <div className="status-error">⚠️ 该视频暂未获取到完整的内容文本，可能是由于下载或转录过程中出现问题。</div>
+                )}
+
+                {/* Source Link */}
+                <div className="flex items-center gap-2 pt-2 border-t border-[var(--hairline)]">
+                  <span className="text-xs text-ink-muted">原始链接：</span>
+                  <a href={selectedVideo.url} target="_blank" rel="noopener noreferrer" className="text-xs text-[var(--primary)] hover:underline flex items-center gap-1">{selectedVideo.url?.substring(0, 60)}... <ExternalLink className="w-3 h-3" /></a>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Delete Confirmation Dialog */}
+        {showDeleteConfirm && deleteTarget && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center" onClick={() => setShowDeleteConfirm(false)}>
+            <div className="card-custom shadow-custom-lg max-w-md w-full mx-4 p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 bg-[var(--tag-red-bg)] rounded-full flex items-center justify-center"><Trash2 className="w-5 h-5" /></div>
+                <h3 className="text-lg font-bold text-ink">确认删除</h3>
+              </div>
+              <p className="text-sm text-ink-secondary mb-2">确定要删除以下视频及其知识条目吗？</p>
+              <div className="bg-[var(--surface-2)] rounded-lg p-3 mb-4">
+                <p className="font-medium text-sm text-ink">{deleteTarget.title}</p>
+                <p className="text-xs text-ink-muted mt-1">{getPlatformIcon(deleteTarget.platform)} {getPlatformName(deleteTarget.platform)} · {deleteTarget.category || '未分类'}</p>
+              </div>
+              <p className="text-xs text-[var(--tag-red-text)] mb-4">⚠️ 此操作不可撤销，将同时删除视频记录和知识库条目。</p>
+              <div className="flex justify-end gap-3">
+                <button onClick={() => setShowDeleteConfirm(false)} className="px-4 py-2 text-sm text-ink-secondary hover:bg-gray-100 rounded-lg transition-colors">取消</button>
+                <button onClick={executeDelete} disabled={isDeleting} className="btn-primary text-sm px-4 py-2">
+                  {isDeleting ? <><Loader2 className="w-3 h-3 animate-spin" />删除中...</> : <><Trash2 className="w-3 h-3" />确认删除</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Move to Category Dialog */}
+        {showMoveToCategory && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center" onClick={() => setShowMoveToCategory(false)}>
+            <div className="card-custom shadow-custom-lg max-w-sm w-full mx-4 p-6" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-bold text-ink mb-4 flex items-center gap-2"><Move className="w-5 h-5 text-indigo-500" />移动到分类</h3>
+              <p className="text-xs text-ink-muted mb-3">选择要将 {selectedIds.size} 个视频移动到的分类：</p>
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {categories.map(cat => (
+                  <button key={cat.name} onClick={() => batchMoveToCategory(cat.name)} className="w-full text-left px-4 py-2.5 hover:bg-indigo-50 rounded-lg text-sm text-ink-secondary hover:text-indigo-700 transition-colors flex items-center gap-2">
+                    <Folder className="w-4 h-4" />{cat.name}<span className="text-xs text-ink-muted">({cat.count})</span>
+                  </button>
+                ))}
+                <button onClick={() => batchMoveToCategory('')} className="w-full text-left px-4 py-2.5 hover:bg-[var(--surface-2)] rounded-lg text-sm text-ink-muted transition-colors flex items-center gap-2">
+                  <Folder className="w-4 h-4" />取消分类
+                </button>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button onClick={() => setShowMoveToCategory(false)} className="px-4 py-2 text-sm text-ink-secondary hover:bg-gray-100 rounded-lg">关闭</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Delete Category Confirmation */}
+        {showDeleteCatConfirm && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center" onClick={() => setShowDeleteCatConfirm(null)}>
+            <div className="card-custom shadow-custom-lg max-w-sm w-full mx-4 p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 bg-[var(--tag-amber-bg)] rounded-full flex items-center justify-center"><Trash2 className="w-5 h-5 text-[var(--tag-amber-text)]" /></div>
+                <h3 className="text-lg font-bold text-ink">删除分类</h3>
+              </div>
+              <p className="text-sm text-ink-secondary mb-2">确定要删除分类 "<strong>{showDeleteCatConfirm}</strong>" 吗？</p>
+              <p className="text-xs text-ink-muted mb-4">该分类下的视频将变为"未分类"状态，视频本身不会被删除。</p>
+              <div className="flex justify-end gap-3">
+                <button onClick={() => setShowDeleteCatConfirm(null)} className="px-4 py-2 text-sm text-ink-secondary hover:bg-gray-100 rounded-lg">取消</button>
+                <button onClick={() => deleteCategory(showDeleteCatConfirm)} className="btn-primary text-sm px-4 py-2">删除分类</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Footer */}
+        <footer className="text-center mt-10 py-6 text-ink-muted text-xs">
+          <p>VideoBrain v2.6 — 类型安全/UX优化/平台扩展 · 智能搜索 · Toast通知 · 快捷键</p>
+          <p className="mt-1 opacity-60">Ctrl+K 搜索 · Ctrl+L 知识库 · Ctrl+S 保存 · Esc 关闭</p>
+        </footer>
+
+        {/* Toast 通知 */}
+        <ToastContainer toasts={toasts} onRemove={removeToast} />
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,18 @@
+const fs = require('fs');
+const html = [];
+html.push('<!DOCTYPE html>');
+html.push('<html lang="zh-CN">');
+html.push('<head>');
+html.push('<meta charset="UTF-8"/>');
+html.push('<meta name="viewport" content="width=device-width,initial-scale=1.0"/>');
+html.push('<title>VideoBrain - 智能视频知识库</title>');
+html.push('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>');
+html.push('<script src="https://cdn.tailwindcss.com"><\/script>');
+html.push('<script>');
+html.push("tailwind.config={theme:{extend:{fontFamily:{sans:['Inter','system-ui','sans-serif']}}}};");
+html.push('<\/script>');
+html.push('<script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"><\/script>');
+html.push('<script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"><\/script>');
+html.push('<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"><\/script>');
+fs.writeFileSync('C:/Users/24700/Desktop/AgencySuperpowersProduct/build.js_part1', html.join('\n'), 'utf8');
+console.log('part1 done');
