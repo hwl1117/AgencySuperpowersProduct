@@ -58,3 +58,16 @@ htmlcov/
 dist/
 build/
 *.egg
+
+# Electron 运行时
+electron-runtime/
+electron/bin/
+electron/launch.bat
+electron/start.bat
+
+# Chrome 数据
+.chrome-data/
+
+# 启动脚本（运行时生成）
+VideoBrain.bat
+launch-app.js
